@@ -1,0 +1,34 @@
+name: clickhouse
+
+services:
+  clickhouse:
+    # 25.8 is a long-term-support release; bump deliberately.
+    image: clickhouse/clickhouse-server:25.8
+    container_name: clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"  # HTTP interface — PyCharm JDBC connects here
+      - "9002:9000"  # Native protocol (clickhouse-client from Windows), remapped to avoid clashing with RustFS's host port 9000
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in .env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    networks:
+      - default
+      # Joins the RustFS stack's network so S3 URLs can use http://rustfs:9000
+      - rustfs
+
+networks:
+  rustfs:
+    external: true
+    name: rustfs_default
+
+volumes:
+  clickhouse-data:
+  clickhouse-logs:

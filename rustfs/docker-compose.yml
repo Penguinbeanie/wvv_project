@@ -1,0 +1,40 @@
+name: rustfs
+
+services:
+  rustfs:
+    # Pin the release; latest is 1.0.0 as of 2026-09. Bump deliberately.
+    image: rustfs/rustfs:1.0.0
+    container_name: rustfs
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web console
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+      RUSTFS_OBS_LOG_DIRECTORY: /logs
+    volumes:
+      - rustfs-data:/data
+      - rustfs-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# Data survives the project rename: these are the volumes created under the
+# previous "wvv_project" project name, referenced explicitly.
+volumes:
+  rustfs-data:
+    external: true
+    name: wvv_project_rustfs-data
+  rustfs-logs:
+    external: true
+    name: wvv_project_rustfs-logs
