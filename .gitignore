@@ -2,3 +2,10 @@
 .env
 .env.*
 !.env.example
+
+# Regenerable pipeline intermediates (produced by scripts/fahrplaene/)
+/data/
+
+# Python bytecode caches (some were written root-owned by the docker fallback)
+__pycache__/
+*.pyc
