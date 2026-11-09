@@ -1,7 +1,7 @@
-# CONCEPT PAPER — DATA ENGINEERING & INFRASTRUCTURE
+CONCEPT PAPER — DATA ENGINEERING & INFRASTRUCTURE
 Smart Mobility Würzburg (Master Project Seminar WS 2026/27)
 
-## THESIS
+THESIS
 All WVV mobility data (APC/AVL stop events 2022–2026, schedules, context
 calendars, optional real-time feeds) can be landed as clean, joinable,
 versioned tables by combining three established patterns: a lakehouse-style
@@ -12,7 +12,7 @@ is contained by a strict validation contract and loads into the same model
 as GTFS data, so all schedule sources converge on one gold layer keyed by
 content fingerprints.
 
-### 1. PROBLEM & SCOPE
+1. PROBLEM & SCOPE
 Two downstream consumers with fixed interface needs: traffic simulation
 (Domain 2) and ML capacity planning (Domain 3). Both need row-per-day,
 row-per-trip data joined on stable keys (stop DHID, line, calendar date).
@@ -21,7 +21,7 @@ rows), Soll-Daten (GTFS snapshots 2022–2025 + PDF timetables 2026), context
 data (holidays, events, lectures, pedestrian counters), and — later, if
 desired — daily real-time ingestion via official APIs.
 
-### 2. REQUIREMENTS
+2. REQUIREMENTS
 Functional: unified stop events; schedules valid per concrete calendar day;
 joinable context dimensions; optional incremental path for real-time/scheduled
 API ingestion (added later without redesign). Non-functional: reproducibility
@@ -29,42 +29,101 @@ API ingestion (added later without redesign). Non-functional: reproducibility
 loaded_at per table), idempotent reloads, append-only history (no
 UPDATE/DELETE), schema-drift handling (35 vs. 42 columns across file vintages).
 
-### 3. DATA SOURCES (claim: GTFS-first, documents and APIs only where the feed cannot go)
-- a) DELFI GTFS weekly snapshots — authoritative, standardized, validated against printed Baustellenfahrplan 2023: 100% trip-level agreement.
+3. DATA SOURCES (descriptive; choices argued in section 4)
+- a) DELFI Soll-Fahrplandaten: published via Open Data ÖPNV in GTFS (weekly
+   snapshot ZIPs, used here) and NeTEx format. Weekly GTFS snapshots 2022–
+   present; validated against printed Baustellenfahrplan 2023: 100% trip-
+   level agreement.
 - b) full_api_data Parquet — APC/AVL stop events (primary observed facts).
-- c) Fahrplan PDFs 2026 — only for the year the feed does not cover.
-- d) Context CSVs — loaded as interval tables, expanded in SQL.
-- e) Real-time/operational APIs (optional, phase-in later): GTFS-RT (gtfs.de national stream, operator participation to verify) or WVV/regional APIs (DEFAS Bavaria / OpenData ÖPNV offer VDV 453 / EFA / TRIAS-style interfaces). Rationale: no single standard yet covers WVV real time, so ingestion is adapter-based behind one internal interface.
+- c) Fahrplan PDFs 2026 — timetable documents organized by day types (Mon–Fri,
+   Samstag, So/Feiertage, Schultage) with per-trip footnote flags; only
+   source for the year the feed does not cover.
+- d) Context CSVs — holidays, events, lectures, pedestrian counters; loaded
+   as interval tables, expanded in SQL.
+- e) Real-time/operational APIs (optional, later): GTFS-RT (gtfs.de national
+   stream, operator participation to verify) or WVV/regional APIs (DEFAS
+   Bavaria / OpenData ÖPNV offer VDV 453 / EFA / TRIAS interfaces). No
+   single standard yet covers WVV real time.
 
-### 4. DESIGN DECISIONS (each as: alternative -> criterion -> decision)
-- a) Raw storage: filesystem vs. S3-compatible object store -> heterogeneous formats, auditability, engine-agnostic access -> RustFS (S3 API).
-- b) Engine: PostGIS vs. document store vs. columnar OLAP -> workload is analytical scans + ML exports, not spatial transactions (only stop coordinates, no routing) -> ClickHouse.
-- c) Layering: single unlayered schema vs. layered zones -> reproducible reprocessing stages and auditable lineage -> raw/clean/dim for bucket loads plus bronze/silver/gold for schedules (medallion convention, stated as convention, not an engine feature).
-- d) Cross-snapshot identity: raw GTFS IDs vs. content fingerprints -> GTFS IDs (route_id/trip_id/service_id) are re-invented on every export -> content fingerprints (cityHash64 of line/direction/stops/times) at (fingerprint, service_date) grain; silver = lossless evidence, gold = effective truth via argMax(snapshot_date); snapshot_count as confidence measure, was_corrected flags revisions.
-- e) Gold granularity: compact validity ranges vs. exploded daily grain -> daily fact rows are the native input format for simulation and ML, and calendar resolution is precomputed once -> daily grain in gold_trip_day; storage duplication acknowledged, compensated by the range view (v_timetable_range).
-- f) 2026 schedules: rule-based parsing vs. LLM extraction -> rule-based parsing failed as brittle across ~65 document layouts -> LLM extraction under a hard validation contract (time format, stop resolution against the GTFS stop list, monotone sequences, day_type enum), deterministic CSV conversion, nothing loaded unvalidated, reject/review queue; loads as a pseudo-snapshot (source='pdf').
-- g) Processing paradigm: streaming vs. batch (Lambda/Kappa as the evaluated alternatives) -> current volume (~1.1M rows/yr APC, weekly snapshots) does not justify a streaming stack -> batch for historical backfill; any incremental ingestion added later is micro-batch (scheduled polling), not streaming.
-- h) Orchestration: manual scripts vs. cron vs. workflow engine -> retry semantics, schedules, observability and an explicit pipeline topology; among engines, maturity/team familiarity -> Apache Airflow DAGs for all Python ingest jobs (GTFS snapshots, LLM extraction, later API adapters); Dagster/Prefect noted as the compared alternatives.
-- i) Real-time API ingestion (future path, designed now): one adapter per source (GTFS-RT protobuf; WVV/EFA/TRIAS JSON) behind one internal interface, vs. a single consumer -> no single real-time standard covers WVV -> adapter-based ingestion: each run lands raw immutable payloads in the bucket (wvv/realtime/<date>/), a decode step writes bronze_rt_*, incremental merges update gold. GTFS-RT references the *feed's* trip_id, which is export-unstable; joining RT events to the fingerprint-keyed gold layer therefore goes through a per-snapshot trip_id->fingerprint lookup built from bronze_trips. Daily granularity suffices for simulation calibration; polling frequency is a config parameter, not a redesign.
+4. DESIGN DECISIONS (each as: alternative -> criterion -> decision)
+- a) Raw storage: filesystem vs. S3-compatible object store -> heterogeneous
+   formats, auditability, engine-agnostic access -> RustFS (S3 API).
+- b) Engine: PostGIS vs. document store vs. columnar OLAP -> workload is
+   analytical scans + ML exports, not spatial transactions (only stop
+   coordinates, no routing) -> ClickHouse.
+- c) Layering: raw->clean->dim alongside bronze/silver/gold (medallion
+   convention, stated as convention, not an engine feature).
+- d) Cross-snapshot identity: GTFS IDs are export-unstable -> content
+   fingerprints (cityHash64 of line/direction/stops/times) at
+   (fingerprint, service_date) grain; silver = lossless evidence,
+   gold = effective truth via argMax(snapshot_date); snapshot_count as
+   confidence measure, was_corrected flags revisions.
+- e) Gold granularity: compact validity ranges vs. exploded daily grain ->
+   precompute calendar resolution once; daily fact rows are the native input
+   format for simulation and ML. Tradeoff acknowledged: storage duplication,
+   compensated by a range view (v_timetable_range).
+- f) Internal schedule representation: NeTEx/Transmodel (EN 12896) vs. GTFS
+   -> GTFS. Reasons: (i) the gold layer resolves all day-type semantics to
+   concrete service dates, so the exchange format only determines ingest
+   cost; (ii) the 2026 extraction contract produces flat GTFS-shaped rows
+   that are per-row hard-validatable, whereas NeTEx would require
+   fabricating a referentially consistent nested object graph
+   (VersionFrames, JourneyPatterns) — validation-intractable for LLM
+   output; (iii) simulation tooling (SUMO, MATSim) consumes GTFS directly;
+   (iv) upstream snapshots are GTFS, so 2022–25 and 2026 share one ingest
+   model. Acknowledged: the PDF day-type organization (Schultage, Mon–Fri)
+   is semantically closer to Transmodel DayType; encoded in GTFS via
+   calendar + calendar_dates and resolved once in silver. NeTEx remains
+   the EU-mandated exchange standard (delegated reg. 2017/1926) — relevant
+   for publishing obligations, not internal storage.
+- g) 2026 schedules: rule-based parsing (failed: brittle across ~65 layouts)
+   -> LLM extraction with hard validation contract (time format, stop
+   resolution against GTFS stop list, monotone sequences, day_type enum),
+   deterministic CSV conversion, nothing loaded unvalidated, reject/review
+   queue; loads as a pseudo-snapshot (source='pdf'). Extraction contract
+   detail: per-trip footnote flags (e.g. "verkehrt nur an Schultagen",
+   alternate routing) are attributes of a trip column, so the schema needs
+   a per-trip day_type/flags field — otherwise school-day-only trips
+   silently become every-day trips.
+- h) Processing paradigm: streaming vs. batch -> batch for historical backfill
+   (~1.1M rows/yr APC, weekly snapshots); streaming rejected at current
+   volume (cite Lambda/Kappa as evaluated alternatives). Incremental
+   ingestion, if added, is micro-batch (scheduled polling), not streaming.
+- i) Orchestration: manual scripts vs. workflow engine -> all Python ingest
+   jobs (GTFS snapshots, LLM extraction, API adapters) run as Apache
+   Airflow DAGs; retry semantics, schedules, observability, explicit
+   pipeline topology. Alternatives (Dagster, Prefect, cron) noted, choice
+   argued on maturity/team familiarity.
+- j) Real-time API ingestion (future path, designed now): adapter per source
+   (GTFS-RT protobuf; WVV/EFA/TRIAS JSON) behind one interface -> each run
+   lands raw immutable payloads in the bucket (wvv/realtime/<date>/) ->
+   decode to bronze_rt_* -> incremental merge into gold. Key technical
+   point: GTFS-RT references the feed's export-unstable trip_id, so RT
+   events join to the fingerprint-keyed gold layer through a per-snapshot
+   trip_id->fingerprint lookup built from bronze_trips. Daily granularity
+   suffices for simulation calibration; polling frequency is a config
+   parameter, not a redesign.
 
-### 5. VALIDATION
+5. VALIDATION
 Trip-per-trip GTFS vs. printed timetable (done, 100%); row-count
 reconciliation per line/year; schema/null profiling; acceptance check: every
 APC journey finds a scheduled counterpart in the applicable timetable;
-RT adapter sanity checks (feed freshness, trip_id resolution rate).
+extraction contract: per-row validation incl. per-trip day_type flags
+(section 4g); RT adapter sanity checks (feed freshness, trip_id resolution
+rate).
 
-### 6. API CONTRACT
+6. API CONTRACT
 Provide: stop events (by line/date/journey), schedules at day grain, stop
 and line dimensions, calendar flags; later: real-time observations if
 ingested. Consume from domains 2/3: their feature requirements. Keys: DHID
 stop IDs, GTFS route_short_name, calendar dates, content fingerprints.
 
-### 7. CONTRIBUTIONS & LIMITATIONS
+7. CONTRIBUTIONS & LIMITATIONS
 Contribution: a transferable pattern for (i) identity-stable versioning of
 GTFS snapshots, (ii) validated LLM extraction integrated into a
-conventional medallion stack, (iii) adapter-based API ingestion designed
-for heterogeneous German PT real-time standards. Limitations: undocumented
-APC semantics (quality_factor, *_measured), source timezone of Parquets
+conventional medallion stack, (iii) adapter-based API ingestion designed for
+heterogeneous German PT real-time standards. Limitations: undocumented APC
+semantics (quality_factor, *_measured), source timezone of Parquets
 unconfirmed, fingerprint identity drifts across time corrections
 (mitigated, not solved), 2026 APC coverage possibly partial, WVV
 availability in national GTFS-RT streams unverified.
@@ -75,12 +134,17 @@ SOURCES TO CONSULT (per position)
   literature — state it as such, note the lack of academic treatment).
 - Columnar OLAP justification: Stonebraker et al., C-Store, VLDB 2005;
   ClickHouse docs (clickhouse.com/docs) for MergeTree semantics.
-- PostGIS counterpoint: postgis.net; PT data standards: Transmodel
-  EN 12896 (transmodel.org), GTFS Reference (gtfs.org / MobilityData),
-  GTFS-RT Reference (gtfs.org/realtime), SIRI EN 15531 and TRIAS (VDV),
-  VDV 453; German feeds: archiv.opendata-oepnv.de (DELFI), gtfs.de
-  (national GTFS/GTFS-RT stream, CC BY-SA 4.0), bayerninfo.de (DEFAS
-  Bavaria real-time formats), vdv.de.
+- PostGIS counterpoint: postgis.net.
+- PT data standards: GTFS Reference (gtfs.org / MobilityData); GTFS-RT
+  Reference (gtfs.org/realtime); Transmodel EN 12896 and NeTEx
+  (transmodel.org, netex-cen.eu); EU delegated regulation 2017/1926 (ITS
+  directive / National Access Points) for the NeTEx-vs-GTFS paragraph;
+  SIRI EN 15531 and TRIAS (VDV), VDV 453; German feeds:
+  archiv.opendata-oepnv.de (DELFI), gtfs.de (national GTFS/GTFS-RT stream,
+  CC BY-SA 4.0), bayerninfo.de (DEFAS Bavaria real-time formats), vdv.de.
+- Simulation tooling (GTFS consumer-side argument): MATSim transit schedule
+  / GTFS converter documentation (matsim.org), SUMO GTFS import
+  documentation (sumo.dlr.de).
 - Dimensional modeling / append-only history: Kimball & Ross, The Data
   Warehouse Toolkit, 3rd ed., 2013.
 - Fingerprinting as entity resolution: Fellegi & Sunter, JASA 1969;
