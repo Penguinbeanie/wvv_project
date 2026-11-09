@@ -1,9 +1,13 @@
 # Environment files with secrets
 .env
 .env.*
-!.env.example
 
-# Regenerable pipeline intermediates (produced by scripts/fahrplaene/)
+# macOS / IDE junk
+.DS_Store
+.idea/
+
+# Local data (sample PDFs, pipeline intermediates, downloads)
+# Raw data lives in the RustFS bucket, not in git.
 /data/
 
 # Python bytecode caches (some were written root-owned by the docker fallback)
