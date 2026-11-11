@@ -1,169 +1,113 @@
-CONCEPT PAPER — DATA ENGINEERING & INFRASTRUCTURE
-Smart Mobility Würzburg (Master Project Seminar WS 2026/27)
+# Term Paper Plan — Domain 1: Data Engineering & Infrastructure
+**Project:** Smart Mobility Würzburg (Master Project Seminar, WS 2026/27)  
+**Target Length:** ~10 pages (excluding title page and references)
 
-THESIS
-All WVV mobility data (APC/AVL stop events 2022–2026, schedules, context
-calendars, optional real-time feeds) can be landed as clean, joinable,
-versioned tables by combining three established patterns: a lakehouse-style
-raw zone (S3 object storage as single source of truth), the medallion
-convention (bronze/silver/gold), and a columnar OLAP engine (ClickHouse).
-The one non-standard element — LLM-based extraction of 2026 timetable PDFs —
-is contained by a strict validation contract and loads into the same model
-as GTFS data, so all schedule sources converge on one gold layer keyed by
-content fingerprints.
+---
 
-1. PROBLEM & SCOPE
-Two downstream consumers with fixed interface needs: traffic simulation
-(Domain 2) and ML capacity planning (Domain 3). Both need row-per-day,
-row-per-trip data joined on stable keys (stop DHID, line, calendar date).
-Not solved: no unified store exists for Ist-Daten (Parquet, 40 lines, 5.1M
-rows), Soll-Daten (GTFS snapshots 2022–2025 + PDF timetables 2026), context
-data (holidays, events, lectures, pedestrian counters), and — later, if
-desired — daily real-time ingestion via official APIs.
+## Guiding Focus & Positioning
 
-2. REQUIREMENTS
-Functional: unified stop events; schedules valid per concrete calendar day;
-joinable context dimensions; optional incremental path for real-time/scheduled
-API ingestion (added later without redesign). Non-functional: reproducibility
-(every product recomputable from raw bucket), provenance (source_file +
-loaded_at per table), idempotent reloads, append-only history (no
-UPDATE/DELETE), schema-drift handling (35 vs. 42 columns across file vintages).
+This plan structures a **technology- and concept-driven research paper**, not a low-level DDL manual (concrete table schemas remain in `gtfs_data_model.md` and `data_pipeline_plan.md`). 
 
-3. DATA SOURCES (descriptive; choices argued in section 4)
-- a) DELFI Soll-Fahrplandaten: published via Open Data ÖPNV in GTFS (weekly
-   snapshot ZIPs, used here) and NeTEx format. Weekly GTFS snapshots 2022–
-   present; validated against printed Baustellenfahrplan 2023: 100% trip-
-   level agreement.
-- b) full_api_data Parquet — APC/AVL stop events (primary observed facts).
-- c) Fahrplan PDFs 2026 — timetable documents organized by day types (Mon–Fri,
-   Samstag, So/Feiertage, Schultage) with per-trip footnote flags; only
-   source for the year the feed does not cover.
-- d) Context CSVs — holidays, events, lectures, pedestrian counters; loaded
-   as interval tables, expanded in SQL.
-- e) Real-time/operational APIs (optional, later): GTFS-RT (gtfs.de national
-   stream, operator participation to verify) or WVV/regional APIs (DEFAS
-   Bavaria / OpenData ÖPNV offer VDV 453 / EFA / TRIAS interfaces). No
-   single standard yet covers WVV real time.
+In line with Phase 1 of `master_pjs.pdf` (*building deep domain expertise before collaborative implementation*), each core chapter follows a two-step pattern:
+1. **Technology Evaluation:** Compare relevant standards, database paradigms, or pipeline concepts and their trade-offs in public transit data engineering.
+2. **Contextual Application:** Justify a concrete architectural choice using the real constraints of the WVV dataset (5.1M APC Parquet rows, unstable weekly GTFS snapshots, unstructured 2026 PDF timetables, and downstream Simulation/ML needs).
 
-4. DESIGN DECISIONS (each as: alternative -> criterion -> decision)
-- a) Raw storage: filesystem vs. S3-compatible object store -> heterogeneous
-   formats, auditability, engine-agnostic access -> RustFS (S3 API).
-- b) Engine: PostGIS vs. document store vs. columnar OLAP -> workload is
-   analytical scans + ML exports, not spatial transactions (only stop
-   coordinates, no routing) -> ClickHouse.
-- c) Layering: raw->clean->dim alongside bronze/silver/gold (medallion
-   convention, stated as convention, not an engine feature).
-- d) Cross-snapshot identity: GTFS IDs are export-unstable -> content
-   fingerprints (cityHash64 of line/direction/stops/times) at
-   (fingerprint, service_date) grain; silver = lossless evidence,
-   gold = effective truth via argMax(snapshot_date); snapshot_count as
-   confidence measure, was_corrected flags revisions.
-- e) Gold granularity: compact validity ranges vs. exploded daily grain ->
-   precompute calendar resolution once; daily fact rows are the native input
-   format for simulation and ML. Tradeoff acknowledged: storage duplication,
-   compensated by a range view (v_timetable_range).
-- f) Internal schedule representation: NeTEx/Transmodel (EN 12896) vs. GTFS
-   -> GTFS. Reasons: (i) the gold layer resolves all day-type semantics to
-   concrete service dates, so the exchange format only determines ingest
-   cost; (ii) the 2026 extraction contract produces flat GTFS-shaped rows
-   that are per-row hard-validatable, whereas NeTEx would require
-   fabricating a referentially consistent nested object graph
-   (VersionFrames, JourneyPatterns) — validation-intractable for LLM
-   output; (iii) simulation tooling (SUMO, MATSim) consumes GTFS directly;
-   (iv) upstream snapshots are GTFS, so 2022–25 and 2026 share one ingest
-   model. Acknowledged: the PDF day-type organization (Schultage, Mon–Fri)
-   is semantically closer to Transmodel DayType; encoded in GTFS via
-   calendar + calendar_dates and resolved once in silver. NeTEx remains
-   the EU-mandated exchange standard (delegated reg. 2017/1926) — relevant
-   for publishing obligations, not internal storage.
-- g) 2026 schedules: rule-based parsing (failed: brittle across ~65 layouts)
-   -> LLM extraction with hard validation contract (time format, stop
-   resolution against GTFS stop list, monotone sequences, day_type enum),
-   deterministic CSV conversion, nothing loaded unvalidated, reject/review
-   queue; loads as a pseudo-snapshot (source='pdf'). Extraction contract
-   detail: per-trip footnote flags (e.g. "verkehrt nur an Schultagen",
-   alternate routing) are attributes of a trip column, so the schema needs
-   a per-trip day_type/flags field — otherwise school-day-only trips
-   silently become every-day trips.
-- h) Processing paradigm: streaming vs. batch -> batch for historical backfill
-   (~1.1M rows/yr APC, weekly snapshots); streaming rejected at current
-   volume (cite Lambda/Kappa as evaluated alternatives). Incremental
-   ingestion, if added, is micro-batch (scheduled polling), not streaming.
-- i) Orchestration: manual scripts vs. workflow engine -> all Python ingest
-   jobs (GTFS snapshots, LLM extraction, API adapters) run as Apache
-   Airflow DAGs; retry semantics, schedules, observability, explicit
-   pipeline topology. Alternatives (Dagster, Prefect, cron) noted, choice
-   argued on maturity/team familiarity.
-- j) Real-time API ingestion (future path, designed now): adapter per source
-   (GTFS-RT protobuf; WVV/EFA/TRIAS JSON) behind one interface -> each run
-   lands raw immutable payloads in the bucket (wvv/realtime/<date>/) ->
-   decode to bronze_rt_* -> incremental merge into gold. Key technical
-   point: GTFS-RT references the feed's export-unstable trip_id, so RT
-   events join to the fingerprint-keyed gold layer through a per-snapshot
-   trip_id->fingerprint lookup built from bronze_trips. Daily granularity
-   suffices for simulation calibration; polling frequency is a config
-   parameter, not a redesign.
+### Core Thesis
+Heterogeneous municipal mobility data—spanning historical sensor logs (*Ist*), multi-source schedules (*Soll*), contextual calendars, and future real-time streams—can be unified without complex GIS-transactional overhead by combining an **S3-based Lakehouse raw zone**, an append-only **Medallion layering convention**, and a **columnar OLAP engine (ClickHouse)**. Where standard feeds break down (export-unstable GTFS IDs and PDF-only 2026 timetables), **content-based fingerprinting** and **contract-validated LLM extraction** allow all sources to converge on a single, reproducible daily schedule and fact model.
 
-5. VALIDATION
-Trip-per-trip GTFS vs. printed timetable (done, 100%); row-count
-reconciliation per line/year; schema/null profiling; acceptance check: every
-APC journey finds a scheduled counterpart in the applicable timetable;
-extraction contract: per-row validation incl. per-trip day_type flags
-(section 4g); RT adapter sanity checks (feed freshness, trip_id resolution
-rate).
+---
 
-6. API CONTRACT
-Provide: stop events (by line/date/journey), schedules at day grain, stop
-and line dimensions, calendar flags; later: real-time observations if
-ingested. Consume from domains 2/3: their feature requirements. Keys: DHID
-stop IDs, GTFS route_short_name, calendar dates, content fingerprints.
+## Page Budget & Seminar Alignment
 
-7. CONTRIBUTIONS & LIMITATIONS
-Contribution: a transferable pattern for (i) identity-stable versioning of
-GTFS snapshots, (ii) validated LLM extraction integrated into a
-conventional medallion stack, (iii) adapter-based API ingestion designed for
-heterogeneous German PT real-time standards. Limitations: undocumented APC
-semantics (quality_factor, *_measured), source timezone of Parquets
-unconfirmed, fingerprint identity drifts across time corrections
-(mitigated, not solved), 2026 APC coverage possibly partial, WVV
-availability in national GTFS-RT streams unverified.
+| Section | Title | Target | `master_pjs.pdf` Criterion Covered | Suggested Visual / Table |
+|---|---|---|---|---|
+| **1** | Introduction & System Context | **1.0 p.** | Role of Domain 1, Spec-Driven approach | System context diagram (Domains 1–3 + Dashboard) |
+| **2** | Mobility Data Sources & Standards | **2.0 p.** | *Evaluate data sources and formats* | Comparison table: GTFS vs. NeTEx & GTFS-RT vs. VDV/SIRI |
+| **3** | Storage & Spatial Database Architectures | **2.0 p.** | *Compare spatial database architectures* | Decision matrix: PostGIS vs. NoSQL vs. Object Store + OLAP |
+| **4** | ETL/ELT Pipeline & Continuous Processing | **2.5 p.** | *Design robust ETL pipelines for continuous processing* | End-to-end Medallion & fingerprinting flow diagram |
+| **5** | Cross-Domain Data & API Contract | **1.5 p.** | *Define the API contract (Needs & Deliverables)* | Bidirectional interface contract table (D1 ↔ D2, D3, UI) |
+| **6** | Critical Discussion & Conclusion | **1.0 p.** | Quality assurance, trade-offs, Phase 2 transition | — |
+| **Total** | | **10.0 p.** | | *3 tables + 2 compact diagrams* |
 
-SOURCES TO CONSULT (per position)
-- Lakehouse/raw-zone pattern: Armbrust et al., "Lakehouse", CIDR 2021.
-- Medallion convention: Databricks docs (databricks.com; practitioner
-  literature — state it as such, note the lack of academic treatment).
-- Columnar OLAP justification: Stonebraker et al., C-Store, VLDB 2005;
-  ClickHouse docs (clickhouse.com/docs) for MergeTree semantics.
-- PostGIS counterpoint: postgis.net.
-- PT data standards: GTFS Reference (gtfs.org / MobilityData); GTFS-RT
-  Reference (gtfs.org/realtime); Transmodel EN 12896 and NeTEx
-  (transmodel.org, netex-cen.eu); EU delegated regulation 2017/1926 (ITS
-  directive / National Access Points) for the NeTEx-vs-GTFS paragraph;
-  SIRI EN 15531 and TRIAS (VDV), VDV 453; German feeds:
-  archiv.opendata-oepnv.de (DELFI), gtfs.de (national GTFS/GTFS-RT stream,
-  CC BY-SA 4.0), bayerninfo.de (DEFAS Bavaria real-time formats), vdv.de.
-- Simulation tooling (GTFS consumer-side argument): MATSim transit schedule
-  / GTFS converter documentation (matsim.org), SUMO GTFS import
-  documentation (sumo.dlr.de).
-- Dimensional modeling / append-only history: Kimball & Ross, The Data
-  Warehouse Toolkit, 3rd ed., 2013.
-- Fingerprinting as entity resolution: Fellegi & Sunter, JASA 1969;
-  Christophides et al., "End-to-End Entity Resolution for Big Data",
-  ACM Computing Surveys 2020 (verify venue).
-- Batch vs. streaming vs. micro-batch: Marz & Warren, Big Data (Lambda,
-  2015); Kreps, "Questioning the Lambda Architecture" (O'Reilly, 2014).
-- Orchestration: Airflow docs (airflow.apache.org; practitioner standard,
-  no significant academic treatment — note this explicitly); compare
-  Dagster/Prefect docs for the alternatives section.
-- LLM extraction: Xu et al., "LLMs for Generative Information Extraction:
-  A Survey" (arxiv.org/abs/2312.17617); Lu et al., "Large Language Model for
-  Table Processing: A Survey", Frontiers of Computer Science 2025
-  (doi.org/10.1007/s11704-024-40763-6); Kasem et al. 2024, table detection
-  survey. Check newest survey before submission.
-- APC data quality: Transportation Research Record (journals.sagepub.com),
-  search "automatic passenger counting validation".
-- Reproducibility/provenance: Wilkinson et al., FAIR principles, Scientific
-  Data 2016 (doi.org/10.1038/sdata.2016.18); data quality: Batini &
-  Scannapieco, Data and Information Quality, 2016.
-- S3 API as de-facto interface: AWS S3 docs; RustFS (rustfs.com) only as an
-  implementation detail — argue the pattern, not the product.
+---
+
+## Section-by-Section Outline
+
+### 1. Introduction & System Context (~1.0 page)
+- **Motivation:** Public transport capacity planning and simulation require aligning *planned supply* (schedules) with *observed demand* (passenger counts) and *external drivers* (holidays, events, lectures).
+- **Role of Domain 1:** Acts as the foundational data platform and interface owner for **Domain 2 (Traffic Simulation)**, **Domain 3 (Capacity Planning & ML)**, and the **Shared Visualization Dashboard**.
+- **Core Requirements:**
+  - *Functional:* Unified stop-event history, calendar-resolved daily schedules, joinable context features, and extensibility to continuous API feeds.
+  - *Non-functional:* Reproducibility from immutable raw files, data provenance, append-only history (no destructive updates), and resilience to schema drift.
+
+### 2. Mobility Data Sources & Exchange Standards (~2.0 pages)
+*Focus: Understand the European/German transit data ecosystem and diagnose the concrete gaps in the WVV data landscape.*
+
+- **Static Schedule Standards (GTFS vs. NeTEx/Transmodel):**
+  - Compare **GTFS** (flat, CSV-based, de-facto standard for routing/simulation tools like SUMO and MATSim) against **NeTEx / Transmodel EN 12896** (hierarchical XML, rich `DayType` concepts, EU-mandated under Delegated Reg. 2017/1926 for National Access Points).
+  - *Contextual Decision:* Adopt GTFS as the internal conceptual anchor—upstream historical archives (DELFI) arrive in GTFS, downstream simulators consume GTFS natively, and flat GTFS-like rows are deterministically validatable when extracting 2026 PDFs (unlike deeply nested NeTEx XML graphs).
+- **Real-Time & Operational APIs (GTFS-RT vs. VDV/SIRI/TRIAS):**
+  - Contrast **GTFS-RT** (lightweight Protobuf `TripUpdates` / `VehiclePositions` referencing static GTFS IDs) with German operator standards (**VDV 453/454**, **SIRI**, **TRIAS** exposed via regional hubs like DEFAS Bavaria). Note the lack of a single unified live stream for regional operators.
+- **Assessment of WVV Project Sources:**
+  - *Soll-Daten (Schedules):* Weekly Germany-wide DELFI GTFS snapshots (2022–2025; empirically verified 100% match against WVV's 2023 construction timetable, including replacement buses/SEV, but lacking stable cross-export IDs) + ~65 WVV timetable PDFs required to cover the 2026 gap.
+  - *Ist-Daten (Observed Demand):* 5.1M APC/AVL stop-event rows in Parquet (2022–2026 across 40 lines), exhibiting empty placeholder files and schema drift (35 columns in 2022–2025 vs. 42 in 2026).
+  - *Context Data:* Interval CSVs (Bavarian public/school holidays, university lectures, events) and hourly pedestrian street counters, plus potential external weather feeds for ML.
+
+### 3. Storage & Spatial Database Architectures (~2.0 pages)
+*Focus: Directly address the spatial database comparison criterion by matching database internals to actual mobility workloads.*
+
+- **Workload Analysis:** Distinguish *topological GIS workloads* (routing, polygon intersections, map-matching—handled inside Domain 2's SUMO/MATSim frameworks) from Domain 1's *analytical data platform workload* (multi-million-row time-series scans, historical snapshot versioning, temporal joins, and bulk ML feature exports, where spatial attributes are primarily fixed stop coordinates).
+- **Comparative Evaluation of Paradigms:**
+  1. **Relational Spatial RDBMS (PostgreSQL / PostGIS):** Rich OGC spatial types, GiST spatial indexing, and strict ACID semantics. Strongest choice for interactive geospatial queries and road-network editing, but row-oriented storage incurs higher overhead on large analytical column scans and historical multi-snapshot deduplication.
+  2. **NoSQL Stores (Document e.g. MongoDB / Wide-Column e.g. Cassandra):** High write throughput and flexible schemas for nested API payloads, but poorly suited for complex relational joins (`Ist × Soll × Calendar`) and ad-hoc OLAP aggregations.
+  3. **Lakehouse Raw Storage + Columnar OLAP (S3 Object Store + ClickHouse):** Decouples cheap, immutable storage of heterogeneous raw files (Parquet, ZIP, PDF, JSON) via the S3 API (implemented via RustFS) from a vectorized, columnar analytical engine optimized for high compression, array types, and fast time-series scans.
+- **Architectural Synthesis:** Justify **S3 + ClickHouse** for WVV based on analytical read performance, native `s3()` table functions, and append-only `MergeTree` versioning—while explicitly defining the boundary where PostGIS would become preferable (e.g., if Domain 1 took over OSM road-graph processing).
+
+### 4. ETL/ELT Pipeline & Continuous Processing (~2.5 pages)
+*Focus: Explain the data engineering patterns needed to turn messy, multi-speed transit sources into reliable, continuously updatable tables.*
+
+- **Processing Paradigm & Orchestration:**
+  - Compare **Streaming** (Kappa/Lambda with Kafka/Flink) vs. **Batch & Scheduled Micro-Batch**. At ~1.1M APC rows/year, weekly GTFS archives, and daily simulation calibration cycles, batch/micro-batch avoids streaming complexity while supporting continuous API polling.
+  - Compare workflow orchestrators (**Apache Airflow** vs. **Dagster / Prefect** vs. cron): select DAG-based orchestration (Airflow) for retries, backfill scheduling, dependency tracking, and observability.
+- **Medallion Layering (`Bronze → Silver → Gold`):**
+  - Use immutable S3 buckets as the single source of truth (reproducibility), followed by logical Medallion layers in ClickHouse: `Bronze/Raw` (1:1 source fidelity + provenance metadata), `Silver/Clean` (type-harmonized, schema-unified, append-only evidence), and `Gold/Dim` (deduplicated business truth).
+- **Domain-Specific Transformation Patterns:**
+  - *Single-Point Calendar Resolution:* Expand GTFS `calendar` + `calendar_dates` rules and context holiday/lecture intervals once into concrete calendar dates so downstream consumers never implement calendar logic.
+  - *Cross-Snapshot Entity Resolution (Content Fingerprinting):* Because DELFI GTFS regenerates `route_id` and `trip_id` on every export, identify unique trips via a deterministic hash (`fingerprint`) over stable attributes (`line`, terminus/direction, `stop_ids`, arrival/departure minutes). Retain all observations in Silver and resolve effective truth in Gold via `argMax(..., snapshot_date)`, yielding built-in revision flags (`was_corrected`) and confidence metrics (`snapshot_count`).
+- **Integrating Unstructured & Continuous Feeds:**
+  - *2026 PDF Extraction with Guardrails:* Explain why coordinate/rule-based PDF grid parsing fails across diverse timetable layouts (referencing preliminary findings) and how multimodal LLM extraction succeeds *only* when wrapped in a **deterministic validation contract** (known DHID stop list, monotonic stop sequences, valid time formats, explicit per-trip school-day footnotes)—ingested as a `source='pdf'` pseudo-snapshot into the identical Medallion flow.
+  - *Continuous Real-Time Extension:* Adapter pattern landing raw GTFS-RT / TRIAS payloads in S3 and joining volatile live `trip_id`s to Gold fingerprints via snapshot lookup tables.
+
+### 5. Cross-Domain Data & API Contract (~1.5 pages)
+*Focus: Fulfill the "Domain Owner" specification requirement by clearly defining shared identifiers, deliverables, and upstream dependencies.*
+
+- **Ubiquitous Join Keys:**
+  - **Spatial / Stop Key:** Official German stop ID (`DHID`, e.g., `de:09663:*`), bridging GTFS, PDFs, simulation nodes, and APC stations.
+  - **Network Key:** Stable GTFS `route_short_name` (incl. `SEV` replacement lines) + normalized direction/terminus.
+  - **Temporal & Trip Keys:** ISO `service_date` (`Europe/Berlin` operating day, supporting >24:00 GTFS minutes) and content `fingerprint`.
+- **What Domain 1 Provides (Outputs & Access Patterns):**
+  - *To Domain 2 (Traffic Simulation — SUMO/MATSim):* Versioned stop coordinates (`gold_stop`), active line metadata (`route_type`), daily trip schedules with arrival and departure arrays (`arr_minutes`, `dep_minutes`), GTFS-compatible export views, and empirical APC boarding/dwell distributions for calibration.
+  - *To Domain 3 (Capacity Planning & ML):* Schema-harmonized `clean.stop_events` (2022–2026), matched `Soll–Ist` trip views (for delay and utilization modeling), and pre-joined calendar/event/lecture/pedestrian feature tables.
+  - *To Shared Dashboard:* Fast analytical SQL views for KPI visualization (line utilization, punctuality, schedule coverage) plus sink tables to store simulation scenarios and ML forecasts.
+  - *Delivery Interface:* Read-only SQL views / HTTP interface in ClickHouse for interactive queries and dashboarding; reproducible Parquet/CSV exports in S3 for reproducible ML training and simulation runs.
+- **What Domain 1 Needs (Inputs from Team & Stakeholders):**
+  - *From Domain 2:* Whether GTFS `shapes.txt` geometries or custom OSM stop-to-link mappings must be persisted, plus output schemas for simulation runs.
+  - *From Domain 3:* Target temporal/spatial aggregation grain, additional external feature requirements (e.g., DWD historical weather data), and schema for forecast/optimized schedule write-back.
+  - *From WVV Stakeholders:* Clarification of undocumented APC fields (`quality_factor`, `passenger_*_measured` vs. `passenger_*`, raw Parquet timezone) and access details for live operational APIs.
+
+### 6. Critical Discussion & Conclusion (~1.0 page)
+- **Key Architectural Trade-offs:**
+  - *Daily exploded schedule grain vs. compact date ranges:* Trades storage duplication (mitigated by columnar compression) for zero-cost temporal joins in ML and simulation.
+  - *Content fingerprints:* Solves ID instability across snapshots, though minor minute-level retimings produce a new fingerprint (mitigated via `was_corrected` tracking at line/time-window level).
+- **Limitations & Data Risks:** Undocumented APC sensor flags, potentially incomplete 2026 APC Parquet exports, manual review queue required for ambiguous PDF footnotes, and unconfirmed WVV coverage in national GTFS-RT feeds.
+- **Conclusion & Phase 2 Outlook:** Summarize how separating raw object storage, append-only versioned transformations, and strict cross-domain contracts provides a maintainable foundation for Phase 2 implementation.
+
+---
+
+## Key References by Section
+
+- **Sec. 1 (Principles & Provenance):** Wilkinson et al. (2016), *FAIR Guiding Principles* (Scientific Data); Batini & Scannapieco (2016), *Data and Information Quality*.
+- **Sec. 2 (Transit Standards):** MobilityData *GTFS & GTFS-RT Reference*; CEN *Transmodel (EN 12896)* & *NeTEx*; *SIRI (EN 15531)* & VDV *453/454 / TRIAS*; EU Delegated Regulation 2017/1926; DELFI / OpenData ÖPNV documentation; SUMO & MATSim GTFS import docs.
+- **Sec. 3 (Storage & Spatial DBs):** Armbrust et al. (2021), *Lakehouse: A New Generation of Open Platforms* (CIDR); Stonebraker et al. (2005), *C-Store: A Column-Oriented DBMS* (VLDB); PostGIS Documentation (*postgis.net*); ClickHouse Documentation (*MergeTree* architecture).
+- **Sec. 4 (Pipelines, Versioning & LLM Extraction):** Kimball & Ross (2013), *The Data Warehouse Toolkit* (append-only / SCD concepts); Databricks *Medallion Architecture* (practitioner pattern); Marz & Warren (2015) & Kreps (2014) (Lambda vs. Kappa / batch vs. streaming); Apache Airflow / Dagster docs; Christophides et al. (2020), *End-to-End Entity Resolution for Big Data* (ACM Comput. Surv.); Lu et al. (2025) / Xu et al. (2024), *LLMs for Table Processing / Information Extraction*.
+- **Sec. 5 & 6 (Transit Data Quality):** APC validation literature (e.g., *Transportation Research Record* studies on Automatic Passenger Counting bias and quality filtering).
