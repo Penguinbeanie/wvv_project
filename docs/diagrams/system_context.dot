@@ -1,0 +1,87 @@
+// WVV system context — Domain 1 as data platform and interface owner.
+// Source of truth: docs/paper_plan.md (§1 context, §5 cross-domain contract)
+// Render: dot -Tsvg system_context.dot -o system_context.svg
+digraph wvv_context {
+    graph [
+        rankdir=TB,
+        splines=spline,
+        nodesep=0.30,
+        ranksep=0.42,
+        fontname="Helvetica",
+        fontsize=12,
+        labelloc="t",
+        bgcolor="white",
+        pad=0.25,
+        compound=true,
+        label=<<B>System context — Domain 1 as data platform and interface owner</B><BR/><FONT POINT-SIZE="9">Double-headed arrows: → deliverables provided · ← requirements flowing back into Domain 1</FONT>>
+    ];
+
+    node [
+        shape=box,
+        style="rounded,filled",
+        fontname="Helvetica",
+        fontsize=11,
+        margin="0.12,0.08",
+        penwidth=1.1
+    ];
+    edge [
+        fontname="Helvetica",
+        fontsize=9,
+        color="#55606b",
+        arrowsize=0.7
+    ];
+
+    // ------------------------------------------------------------ upstream
+    subgraph cluster_up {
+        label=<<B>Upstream sources</B>>;
+        style="rounded,dashed"; color="#8fa3b8"; fontcolor="#3d4a57"; fontsize=11;
+
+        up_delfi [label="DELFI archive\nGTFS 2022–2025", fillcolor="#eef2f7", color="#8fa3b8"];
+        up_pdf   [label="WVV Fahrpläne\n2026 PDFs", fillcolor="#eef2f7", color="#8fa3b8"];
+        up_apc   [label="WVV APC / AVL\nParquet", fillcolor="#eef2f7", color="#8fa3b8"];
+        up_ctx   [label="Context feeds\nholidays · events", fillcolor="#eef2f7", color="#8fa3b8"];
+        up_live  [label="Live feeds (future)\nGTFS-RT · TRIAS", fillcolor="#f6f8fa", color="#a9b8c6", style="rounded,dashed"];
+
+        { rank=same; up_delfi; up_pdf; up_apc; up_ctx; up_live; }
+    }
+
+    // ------------------------------------------------------------- domain 1
+    subgraph cluster_d1 {
+        label=<<B>Domain 1 — Data Engineering &amp; Infrastructure</B>>;
+        style="rounded,filled"; fillcolor="#eaf5ec"; color="#4c8a5c"; fontcolor="#2f5a3a"; fontsize=12;
+
+        d1_raw [label="Raw zone — RustFS / S3\nimmutable · Parquet · ZIP · PDF · CSV", fillcolor="#ffffff", color="#5f9e6e"];
+        d1_med [label="Medallion layers\nbronze → silver → gold · append-only, versioned", fillcolor="#dcefe1", color="#5f9e6e"];
+        d1_mod [label="Unified model\nclean.stop_events · dim.* · gold_trip_day · ref_calendar", fillcolor="#cfe8d6", color="#4c8a5c"];
+        d1_api [label="Contract surface — SQL views · HTTP · Parquet exports\njoin keys: DHID · route_short_name · service_date · fingerprint", fillcolor="#b9dcc4", color="#3f7a4e"];
+
+        d1_raw -> d1_med [label="ingest"];
+        d1_med -> d1_mod [label="resolve"];
+        d1_mod -> d1_api [label="serve"];
+    }
+
+    // ----------------------------------------------------------- consumers
+    subgraph cluster_down {
+        label=<<B>Downstream domains &amp; stakeholders</B>>;
+        style="rounded,filled"; fillcolor="#fffaea"; color="#c9a227"; fontcolor="#6b5600"; fontsize=11;
+
+        wvv [label="WVV stakeholders\nAPC semantics · live API access", fillcolor="#eef2f7", color="#8fa3b8"];
+        d2  [label="Domain 2 — Traffic simulation\nSUMO / MATSim", fillcolor="#fff3c4", color="#c9a227"];
+        d3  [label="Domain 3 — Capacity & ML\nforecasting · utilisation", fillcolor="#fff3c4", color="#c9a227"];
+        ui  [label="Shared dashboard\nKPIs · scenarios", fillcolor="#fff3c4", color="#c9a227"];
+
+        { rank=same; wvv; d2; d3; ui; }
+    }
+
+    // --------------------------------------------------------------- edges
+    up_delfi -> d1_raw [label="GTFS ZIPs"];
+    up_pdf   -> d1_raw [label="PDF timetables"];
+    up_apc   -> d1_raw [label="Parquet"];
+    up_ctx   -> d1_raw [label="CSV"];
+    up_live  -> d1_raw [label="adapter (future)", style=dashed];
+
+    d1_api -> d2 [dir=both, label="→ gold_stop · gold_line · gold_trip_day\n← shapes / OSM needs · sim schemas"];
+    d1_api -> d3 [dir=both, label="→ clean.stop_events · Soll–Ist views\n← grain · weather · write-back"];
+    d1_api -> ui [dir=both, label="→ KPI views · scenario sinks\n← visualisation needs"];
+    d1_api -> wvv [dir=back, style=dashed, label="APC semantics · live API access"];
+}

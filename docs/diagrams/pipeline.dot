@@ -1,0 +1,151 @@
+// WVV data pipeline — end to end.
+// Source of truth: docs/data_pipeline_plan.md (§3 raw data, §4 architecture, §5 model, §6 phases)
+// Render: dot -Tsvg pipeline.dot -o pipeline.svg
+digraph wvv_pipeline {
+    graph [
+        rankdir=TB,
+        splines=spline,
+        nodesep=0.26,
+        ranksep=0.34,
+        fontname="Helvetica",
+        fontsize=12,
+        labelloc="t",
+        bgcolor="white",
+        pad=0.25,
+        compound=true,
+        label=<<B>WVV data pipeline — end to end</B><BR/><FONT POINT-SIZE="9">Immutable raw zone in RustFS · Medallion layers in ClickHouse · edge labels = execution phase (data_pipeline_plan.md §6)</FONT>>
+    ];
+
+    node [
+        shape=box,
+        style="rounded,filled",
+        fontname="Helvetica",
+        fontsize=11,
+        margin="0.12,0.07",
+        penwidth=1.1
+    ];
+    edge [
+        fontname="Helvetica",
+        fontsize=9,
+        color="#55606b",
+        arrowsize=0.7
+    ];
+
+    // ================================================================ sources
+    subgraph cluster_src {
+        label=<<B>Upstream providers</B>>;
+        style="rounded,dashed"; color="#8fa3b8"; fontcolor="#3d4a57"; fontsize=11;
+
+        src_apc  [label="full_api_data\n201 Parquet · 177 with rows\n≈5.11 M rows · 2022–2026", fillcolor="#eef2f7", color="#8fa3b8"];
+        src_ctx  [label="Additional Data\n10 context CSVs", fillcolor="#eef2f7", color="#8fa3b8"];
+        src_gtfs [label="DELFI archive\nweekly GTFS ZIPs 2022–2025", fillcolor="#eef2f7", color="#8fa3b8"];
+        src_pdf  [label="WVV Fahrpläne\n~65 PDFs valid in 2026", fillcolor="#eef2f7", color="#8fa3b8"];
+
+        { rank=same; src_apc; src_ctx; src_gtfs; src_pdf; }
+    }
+
+    // ================================================================= bucket
+    subgraph cluster_bucket {
+        label=<<B>RustFS bucket "wvv"</B> — single raw source of truth>;
+        style="rounded,filled"; fillcolor="#fdf3e8"; color="#d99a4e"; fontcolor="#7a4d16"; fontsize=11;
+
+        b_apc  [label="full_api_data/\n*.parquet", fillcolor="#fbe3c9", color="#d99a4e"];
+        b_ctx  [label="Additional Data/\n*.csv", fillcolor="#fbe3c9", color="#d99a4e"];
+        b_gtfs [label="gtfs/\n&lt;snapshot_date&gt;.zip", fillcolor="#fbe3c9", color="#d99a4e"];
+        b_fahr [label="Fahrplaene/\nPDF + XLSX", fillcolor="#fbe3c9", color="#d99a4e"];
+
+        { rank=same; b_apc; b_ctx; b_gtfs; b_fahr; }
+    }
+
+    // =================================================================== jobs
+    subgraph cluster_jobs {
+        label=<<B>Ingest jobs</B>>;
+        style="rounded,filled"; fillcolor="#f4eefa"; color="#9b7bb8"; fontcolor="#4d3566"; fontsize=11;
+
+        j_ch   [label="ClickHouse s3() INSERT\npure SQL · explicit schema", fillcolor="#e6d8f5", color="#9b7bb8"];
+        j_gtfs [label="Python · GTFS ingest\nWVV filter: agency 13346,\nstops de:09663 / de:0967x", fillcolor="#e6d8f5", color="#9b7bb8"];
+        j_llm  [label="Python · PDF → LLM\nPyMuPDF + DeepSeek v4.1 flash\n+ validation contract", fillcolor="#e6d8f5", color="#9b7bb8"];
+
+        { rank=same; j_ch; j_gtfs; j_llm; }
+    }
+
+    // ============================================================= clickhouse
+    subgraph cluster_ch {
+        label=<<B>ClickHouse 25.8 LTS</B> — raw → clean/dim · bronze → silver → gold · serving>;
+        style="rounded,filled"; fillcolor="#f2f8f3"; color="#5f9e6e"; fontcolor="#2f5a3a"; fontsize=12;
+
+        b_cur [label="curated/schedules_2026/\nvalidated CSVs · source='pdf'", fillcolor="#f7d7b0", color="#c8813a"];
+
+        raw_stop [label="raw.stop_events\nsource_file · loaded_at", fillcolor="#ffffff", color="#5f9e6e"];
+        raw_ctx  [label="raw.context_*\n10 CSV tables", fillcolor="#ffffff", color="#5f9e6e"];
+
+        clean_stop [label="clean.stop_events\nunified 42-col schema 2022–2026", fillcolor="#e8f4ea", color="#5f9e6e"];
+        dim        [label="dim.* · clean.pedestrian_counts\nholidays · events · lectures", fillcolor="#e8f4ea", color="#5f9e6e"];
+
+        bronze [label="bronze_*\n1:1 GTFS + snapshot_date\n(PDF = pseudo-snapshot)", fillcolor="#e8f4ea", color="#5f9e6e"];
+        silver [label="silver_*\nservice dates · fingerprints", fillcolor="#dcefe1", color="#5f9e6e"];
+        gold   [label="gold_*\nargMax(snapshot_date)\nsnapshot_count · was_corrected", fillcolor="#cfe8d6", color="#4c8a5c"];
+
+        ref_cal [label="ref_calendar\nBavarian holiday / school flags", fillcolor="#e8f4ea", color="#5f9e6e"];
+        views   [label="v_* views — Soll–Ist match · timetable ranges · KPI + feature exports", fillcolor="#b9dcc4", color="#3f7a4e"];
+
+        { rank=same; b_cur; raw_stop; raw_ctx; }
+        { rank=same; clean_stop; dim; bronze; }
+        { rank=same; ref_cal; silver; }
+    }
+
+    // ============================================================== consumers
+    subgraph cluster_cons {
+        label=<<B>Consumers</B>>;
+        style="rounded,filled"; fillcolor="#fffaea"; color="#c9a227"; fontcolor="#6b5600"; fontsize=11;
+
+        c_d2 [label="Domain 2\nSUMO / MATSim", fillcolor="#fff3c4", color="#c9a227"];
+        c_d3 [label="Domain 3\nCapacity & ML", fillcolor="#fff3c4", color="#c9a227"];
+        c_ui [label="Shared dashboard\nKPIs", fillcolor="#fff3c4", color="#c9a227"];
+
+        { rank=same; c_d2; c_d3; c_ui; }
+    }
+
+    // keep column order stable: facts | context | schedules
+    src_apc -> src_ctx -> src_gtfs -> src_pdf [style=invis];
+    b_apc -> b_ctx -> b_gtfs -> b_fahr [style=invis];
+    j_ch -> j_gtfs -> j_llm [style=invis];
+    raw_stop -> raw_ctx -> b_cur [style=invis];
+    clean_stop -> dim -> bronze [style=invis];
+    ref_cal -> silver [style=invis];
+    c_d2 -> c_d3 -> c_ui [style=invis];
+
+    // ============================================================= data flow
+    src_apc  -> b_apc  [label="upload"];
+    src_ctx  -> b_ctx  [label="upload"];
+    src_gtfs -> b_gtfs [label="download"];
+    src_pdf  -> b_fahr [label="fetch"];
+
+    b_apc  -> j_ch   [label="phase 1"];
+    b_ctx  -> j_ch   [label="phase 3"];
+    b_gtfs -> j_gtfs [label="phase 4"];
+    b_fahr -> j_llm  [label="phase 5"];
+
+    j_ch   -> raw_stop [label="phase 1"];
+    j_ch   -> raw_ctx  [label="phase 3"];
+    j_gtfs -> bronze   [label="phase 4"];
+    j_llm  -> b_cur    [label="phase 5"];
+
+    b_cur -> bronze [label="pseudo-snapshot", style=dashed];
+
+    raw_stop -> clean_stop [label="phase 2\nunify · validate · dedup"];
+    raw_ctx  -> dim        [label="phase 3\nexpand in SQL"];
+    dim      -> clean_stop [style=dashed, label="is_holiday", constraint=false];
+    dim      -> ref_cal    [style=dashed];
+
+    bronze -> silver [label="resolve calendar\n+ fingerprint"];
+    silver -> gold   [label="dedup · argMax\n· features"];
+
+    gold       -> views [label="phase 6"];
+    clean_stop -> views [label="phase 6"];
+    ref_cal    -> views [style=dashed];
+
+    views -> c_d2 [label="SQL views +\nParquet exports"];
+    views -> c_d3 [label="SQL views +\nParquet exports"];
+    views -> c_ui [label="HTTP / SQL"];
+}

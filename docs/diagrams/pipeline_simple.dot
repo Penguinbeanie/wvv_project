@@ -1,0 +1,90 @@
+// WVV pipeline — source overview.
+// Each source is shown with how it is handled, but without the granular
+// provenance / phase detail of pipeline.dot.
+// Render: dot -Tsvg pipeline_simple.dot -o pipeline_simple.svg
+digraph wvv_overview {
+    graph [
+        rankdir=TB,
+        splines=spline,
+        nodesep=0.26,
+        ranksep=0.38,
+        fontname="Helvetica",
+        fontsize=13,
+        labelloc="t",
+        bgcolor="white",
+        pad=0.30,
+        label=<<B>WVV data pipeline</B><BR/><FONT POINT-SIZE="10">Four sources, three handling paths, one query-ready model.</FONT>>
+    ];
+
+    node [
+        shape=box,
+        style="rounded,filled",
+        fontname="Helvetica",
+        fontsize=12,
+        margin="0.13,0.12",
+        penwidth=1.2
+    ];
+    edge [
+        color="#6b7783",
+        arrowsize=0.75
+    ];
+
+    // ------------------------------------------------------------- sources
+    s_apc  [label=<<B>APC Parquet</B><BR/><FONT POINT-SIZE="10"><FONT COLOR="#8a6d3b">Ist</FONT> · 177 files · 5.1 M rows</FONT>>, fillcolor="#ffffff", color="#9aa8b6"];
+    s_gtfs [label=<<B>DELFI GTFS</B><BR/><FONT POINT-SIZE="10"><FONT COLOR="#2f5a3a">Soll</FONT> · weekly ZIPs 2022–2025</FONT>>, fillcolor="#ffffff", color="#9aa8b6"];
+    s_pdf  [label=<<B>WVV PDFs</B><BR/><FONT POINT-SIZE="10"><FONT COLOR="#2f5a3a">Soll</FONT> · 2026 timetables</FONT>>, fillcolor="#ffffff", color="#9aa8b6"];
+    s_ctx  [label=<<B>Context CSVs</B><BR/><FONT POINT-SIZE="10"><FONT COLOR="#5c4a00">Context</FONT> · holidays · events · lectures</FONT>>, fillcolor="#ffffff", color="#9aa8b6"];
+
+    // -------------------------------------------------------------- bucket
+    rustfs [label=<<B>RustFS</B> — immutable raw zone (S3)>, fillcolor="#fdf0e0", color="#d99a4e", width=8.6];
+
+    // ------------------------------------------------------------ handling
+    h_apc  [label=<<B>s3() INSERT</B><BR/><FONT POINT-SIZE="10">pure SQL</FONT>>, fillcolor="#e6d8f5", color="#9b7bb8"];
+    h_gtfs [label=<<B>Python</B><BR/><FONT POINT-SIZE="10">WVV filter · agency 13346</FONT>>, fillcolor="#e6d8f5", color="#9b7bb8"];
+    h_pdf  [label=<<B>LLM extraction</B><BR/><FONT POINT-SIZE="10">PyMuPDF + DeepSeek</FONT>>, fillcolor="#e6d8f5", color="#9b7bb8"];
+    h_ctx  [label=<<B>s3() INSERT</B><BR/><FONT POINT-SIZE="10">pure SQL</FONT>>, fillcolor="#e6d8f5", color="#9b7bb8"];
+
+    // -------------------------------------------------------------- layers
+    l_apc  [label=<<B>raw → clean</B><BR/><FONT POINT-SIZE="10">stop_events</FONT>>, fillcolor="#eaf5ec", color="#5f9e6e"];
+    l_gtfs [label=<<B>bronze → silver → gold</B><BR/><FONT POINT-SIZE="10">gold_trip_day — source of truth</FONT>>, fillcolor="#cfe8d6", color="#3f7a4e", penwidth=2.2];
+    l_pdf  [label=<<B>curated CSVs</B><BR/><FONT POINT-SIZE="10">validated output</FONT>>, fillcolor="#eaf5ec", color="#5f9e6e"];
+    l_ctx  [label=<<B>raw → dim</B><BR/><FONT POINT-SIZE="10">calendars · events</FONT>>, fillcolor="#eaf5ec", color="#5f9e6e"];
+
+    // -------------------------------------------------------------- serving
+    views [label=<<B>v_* views</B> — Soll × Ist × calendar, query-ready>, fillcolor="#b9dcc4", color="#3f7a4e", width=8.6];
+    cons  [label=<<B>Consumers</B> — Domain 2 · Domain 3 · dashboard>, fillcolor="#fff3c4", color="#c9a227", width=8.6];
+
+    // ---------------------------------------------------------------- ranks
+    { rank=same; s_apc; s_gtfs; s_pdf; s_ctx; }
+    { rank=same; h_apc; h_gtfs; h_pdf; h_ctx; }
+    { rank=same; l_apc; l_gtfs; l_pdf; l_ctx; }
+
+    // ----------------------------------------------------------------- flow
+    s_apc  -> rustfs;
+    s_gtfs -> rustfs;
+    s_pdf  -> rustfs;
+    s_ctx  -> rustfs;
+
+    rustfs -> h_apc;
+    rustfs -> h_gtfs;
+    rustfs -> h_pdf;
+    rustfs -> h_ctx;
+
+    h_apc  -> l_apc;
+    h_gtfs -> l_gtfs;
+    h_pdf  -> l_pdf;
+    h_ctx  -> l_ctx;
+
+    l_pdf -> l_gtfs [style=dashed, constraint=false, label="same model", fontsize=9];
+
+    // GTFS supplies the extraction contract for the 2026 PDFs:
+    // target schema, fixed line list, known stop names.
+    l_gtfs -> h_pdf [style=dashed, constraint=false, color="#3f7a4e", fontsize=9,
+                     label="schema · line list · stop list"];
+
+    l_apc  -> views;
+    l_gtfs -> views;
+    l_ctx  -> views;
+
+    views -> cons;
+}

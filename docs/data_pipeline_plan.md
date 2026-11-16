@@ -237,6 +237,13 @@ no concept of identity across exports, so gold re-keys everything on content: a 
    `snapshot_count` is a free confidence measure; `was_corrected` flags the outliers.
 3. Stops keep append-only history (`silver_stop`), gold holds the current state via
    `first_seen`/`last_seen` lifecycle — no UPDATE/DELETE anywhere.
+   - **Two-tier stop hierarchy (`gold_station` + `gold_stop_platform`):** DELFI GTFS lists
+     individual platforms/bays without `parent_station` (e.g., `de:09663:40:0:01`,
+     `:02`, `:11`, `:12` all for *Wü Andreas-Grieser-Straße*). Gold collapses every
+     5-part DHID to its 3-segment station prefix (`de:09663:40`, `canonical_stop_id`) in
+     `gold_station` (centroid `lat`/`lon`, canonical name) while retaining raw platform
+     rows in `gold_stop_platform`. Trip `fingerprint`s use `canonical_stop_id` so minor
+     platform reassignments do not split identical trips across snapshots.
 4. `stop_ids`/`dep_minutes` arrays are compact and ClickHouse-native and give ML/simulation
    direct access to the whole journey per row.
 5. Bavarian holiday/school flags come from an external `ref_calendar` — correct, because
@@ -299,6 +306,87 @@ Acceptance check (both schedule sources): for sample dates, every APC journey fi
 matching scheduled trip in the applicable timetable (template: the 2023
 construction-summer comparison). This unlocks schedule-adherence analysis
 (`departure_plan_station` vs. printed plan) and simulation inputs.
+
+### 5.4 Soll–Ist integration & final consumer outputs
+
+Although `full_api_data/` carries `departure_plan_*` columns, it cannot serve as the
+master Soll source (survivorship bias—cancelled runs, unequipped vehicles, and 24 empty
+line-files are absent; no `lat`/`lon` or DHID; no structural calendar; operational vs.
+published plan ambiguity). Instead, `*_plan_*` is the **matching bridge** between Ist
+and Soll:
+
+1. **Static crosswalks:**
+   - `curated/stop_crosswalk.csv`: maps `full_api_data` `(station_number, station_short,
+     station)` $\rightarrow$ `canonical_stop_id` (`de:09663:40`) via normalized name
+     matching + manual review of ambiguous stops.
+   - `curated/line_crosswalk.csv`: maps `full_api_data.line` (Int64) $\rightarrow$ GTFS
+     `route_short_name` (String, incl. `SEV` variants).
+2. **Tiered trip-signature matcher** (`clean.stop_events` $\rightarrow$ `gold_trip_day.fingerprint`):
+   - **Tier 1 (Exact):** Match `(service_date, route_short_name, origin_dhid, dest_dhid,
+     planned_start_min ± 1)`.
+   - **Tier 2 (Subsequence fallback):** For short-turns or partial APC recordings, match
+     `(service_date, route_short_name)` with $\ge 80\%$ contiguous `(canonical_stop_id,
+     departure_plan_station)` overlap within $\pm 2\text{ min}$.
+   - **Tier 3 (Unmatched):** Flag remaining journeys (`match_status = 'unmatched'`) as
+     unscheduled extra runs / deadheads rather than dropping them.
+3. **Final consumer formats:**
+   - **Domain 2 (Simulation — SUMO/MATSim):** Standard **GTFS `.zip`** exported on demand
+     from Gold (`gold_station`, `gold_line`, `gold_trip_day`) for any requested date range.
+   - **Domain 3 (ML):** A single **expanded flat table** (`gold.ml_stop_events_flat`,
+     exposed as a ClickHouse view and Parquet export) at `(service_date, fingerprint,
+     stop_sequence)` grain joining Soll + Ist + Context. Domain 3 can transform this flat
+     table into whatever model-specific structure they require (tabular, sequences, or
+     graph tensors).
+
+### 5.5 Data format examples across pipeline steps
+
+Tracing a single stop event (Line 1 at *Andreas-Grieser-Straße*) from raw sources to
+consumer outputs:
+
+**1. Raw GTFS (`stops.txt` & `stop_times.txt` in `bronze_*`)** — platform-level IDs,
+snapshot-local `trip_id`:
+```text
+# stops.txt (4 entries for the same station)
+"de:09663:40:0:01","","Wü Andreas-Grieser-Straße",,"49.767547","9.941197",0,,0,"",""
+"de:09663:40:0:02","","Wü Andreas-Grieser-Straße",,"49.767361","9.941512",0,,0,"",""
+"de:09663:40:0:11","","Wü Andreas-Grieser-Straße",,"49.767530","9.941467",0,,0,"",""
+"de:09663:40:0:12","","Wü Andreas-Grieser-Straße",,"49.767478","9.940999",0,,0,"",""
+
+# stop_times.txt (snapshot 2025-01-06)
+trip_id="de:nvm:stwü|Straba|1:_0_14", stop_sequence=4, stop_id="de:09663:40:0:01", arrival_time="07:14:00", departure_time="07:14:00"
+```
+
+**2. Raw APC Parquet (`full_api_data/` $\rightarrow$ `raw.stop_events`)** — internal
+WVV IDs, no coordinates or DHID:
+```text
+main_date_day=2025-01-13 | journey=88412 | line=1 | direction="A" | stop_sequence=4
+station_number=40 | station_short="AGRI" | station="Andreas-Grieser-Straße"
+departure_plan_station="2025-01-13 07:14:00" | departure_hour_station="2025-01-13 07:15:42"
+passenger_boarding=5 | passenger_exiting=2 | occupancy_departure=34 | vehicle_utilization=0.28
+```
+
+**3. Gold Layer (`gold_station` & `gold_trip_day` in ClickHouse)** — 3-part canonical
+DHID + content fingerprint:
+```text
+# gold_station
+canonical_stop_id="de:09663:40" | stop_name="Wü Andreas-Grieser-Straße" | lat=49.767479 | lon=9.941294
+
+# gold_trip_day
+service_date=2025-01-13 | fingerprint=9182736455019283746 | line="1" | headsign="Sanderau"
+stop_ids=["de:09663:12", ..., "de:09663:40", ...] | arr_minutes=[428, ..., 434, ...] | dep_minutes=[428, ..., 434, ...]
+```
+
+**4. Final Consumer Outputs:**
+- **Domain 2 (GTFS export `.zip`):** Standard `stops.txt`, `routes.txt`, `trips.txt`,
+  `stop_times.txt`, `calendar_dates.txt` generated from Gold for the simulation window.
+- **Domain 3 (`gold.ml_stop_events_flat` Parquet / SQL view):**
+```text
+service_date=2025-01-13 | fingerprint=9182736455019283746 | line="1" | direction="Sanderau"
+stop_sequence=4 | canonical_stop_id="de:09663:40" | next_canonical_stop_id="de:09663:41"
+planned_dep_min=434 | actual_dep_ts="2025-01-13 07:15:42" | delay_sec=102 | is_cancelled=0
+passenger_boarding=5 | passenger_exiting=2 | occupancy_departure=34 | vehicle_utilization=0.28
+is_public_holiday=0 | is_school_holiday=0 | is_lecture_jmu=1 | event_active=0 | pedestrian_count=412
+```
 
 ## 6. Execution phases
 
