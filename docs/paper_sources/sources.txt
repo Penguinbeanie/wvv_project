@@ -1,0 +1,9 @@
+Schröder, D., May-Beckmann, O., Merk, L., Müller, L., & Barandiarán, A. (2025). Wertschöpfung ÖPNV (Abschlussbericht). MCube Consulting GmbH – Münchner Cluster für die Zukunft der Mobilität in Metropolregionen (MCube), Technische Universität München.
+
+Mocanu, T., Joshi, J., & Winkler, C. (2021). A data-driven analysis of the potential of public transport for German commuters using accessibility indicators. European Transport Research Review, 13(1), 54.
+
+Salomo, K. (2025). Public transportation equity in mid-sized and large German cities: Immigrant neighborhoods benefit from fixed-rail, low-income areas rely more on buses in large German cities. Cities, 170, Article 106653.
+
+Furth, P. G., Hemily, B., Muller, T. H. J., & Strathman, J. G. (2006). Using archived AVL-APC data to improve transit performance and management (TCRP Report 113). Transportation Research Board.
+
+Glinz, M. (2007). On non-functional requirements. In 2007 15th IEEE International Requirements Engineering Conference (RE 2007) (pp. 21–26). IEEE.  https://doi.org/10.1109/RE.2007.45
